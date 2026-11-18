@@ -55,7 +55,7 @@ function playNotes(notes: Note[], volume = 0.18) {
 }
 
 export function playTone(index: number) {
-  const tone = TONES[(Math.max(1, Math.min(10, index)) - 1) as number];
+  const tone = TONES[Math.max(1, Math.min(10, index)) - 1] ?? TONES[0]!;
   playNotes(tone.notes);
 }
 

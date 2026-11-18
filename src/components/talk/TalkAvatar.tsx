@@ -2,12 +2,12 @@ import { cn } from "@/lib/utils";
 import { useSignedUrl } from "@/lib/media";
 
 type Props = {
-  name?: string | null;
-  path?: string | null;
-  src?: string | null;
-  size?: number;
-  online?: boolean;
-  className?: string;
+  name?: string | null | undefined;
+  path?: string | null | undefined;
+  src?: string | null | undefined;
+  size?: number | undefined;
+  online?: boolean | undefined;
+  className?: string | undefined;
 };
 
 export function TalkAvatar({ name, path, src, size = 40, online, className }: Props) {

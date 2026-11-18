@@ -189,9 +189,10 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
     const t = setInterval(() => {
       setTyping((cur) => {
         const now = Date.now();
-        const keys = Object.keys(cur).filter((k) => cur[k] > now);
-        if (keys.length === Object.keys(cur).length) return cur;
-        return Object.fromEntries(keys.map((k) => [k, cur[k]]));
+        const next: Record<string, number> = {};
+        for (const [k, v] of Object.entries(cur)) if (v > now) next[k] = v;
+        if (Object.keys(next).length === Object.keys(cur).length) return cur;
+        return next;
       });
     }, 1000);
     return () => clearInterval(t);

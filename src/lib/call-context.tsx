@@ -222,6 +222,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       const fresh = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { exact: facing } } })
         .catch(() => navigator.mediaDevices.getUserMedia({ video: { facingMode: facing } }));
       const track = fresh.getVideoTracks()[0];
+      if (!track) throw new Error("no camera");
       const old = s.getVideoTracks()[0];
       const sender = pc?.getSenders().find((x) => x.track?.kind === "video");
       await sender?.replaceTrack(track);
@@ -286,7 +287,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           if (c?.id === callId) cleanup("Busy on another call");
           return;
         case "call-end":
-          if (c?.id === callId) cleanup(c.phase === "ringing" && c.direction === "in" ? "Missed call" : "Call ended");
+          if (c && c.id === callId) cleanup(c.phase === "ringing" && c.direction === "in" ? "Missed call" : "Call ended");
           return;
       }
     });

@@ -184,7 +184,10 @@ function ChatPage() {
     const ids = [...selected];
     const rows = messages.filter((m) => selected.has(m.id));
     const { error } = await supabase.from("messages").delete().in("id", ids);
-    if (error) return toast("Couldn't delete");
+    if (error) {
+      toast("Couldn't delete");
+      return;
+    }
     qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !selected.has(m.id)));
     void removeMedia(rows);
     void qc.invalidateQueries({ queryKey: ["recent", me] });
@@ -198,7 +201,10 @@ function ChatPage() {
       .from("messages")
       .delete()
       .or(`and(sender_id.eq.${me},recipient_id.eq.${otherId}),and(sender_id.eq.${otherId},recipient_id.eq.${me})`);
-    if (error) return toast("Couldn't delete");
+    if (error) {
+      toast("Couldn't delete");
+      return;
+    }
     qc.setQueryData<Message[]>(messagesKey(otherId), []);
     void removeMedia(rows);
     void qc.invalidateQueries({ queryKey: ["recent", me] });
@@ -291,7 +297,7 @@ function ChatPage() {
             <p className="py-16 text-center text-sm text-muted-foreground">Say hi to {peer?.display_name ?? "them"}.</p>
           ) : (
             messages.map((m, i) => {
-              const showDay = i === 0 || new Date(messages[i - 1].created_at).toDateString() !== new Date(m.created_at).toDateString();
+              const showDay = i === 0 || new Date(messages[i - 1]!.created_at).toDateString() !== new Date(m.created_at).toDateString();
               const mine = m.sender_id === me;
               return (
                 <Fragment key={m.id}>
