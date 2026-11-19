@@ -18,13 +18,14 @@ import { supabase } from "@/integrations/supabase/client";
 import { useCall } from "@/lib/call-context";
 import { extFor, pairKey, shrinkImage } from "@/lib/media";
 import { fetchConversation, messagesKey, useTalk, type Message } from "@/lib/talk-context";
+import { ago } from "@/lib/time";
 
 export const Route = createFileRoute("/_authenticated/chat/$userId")({
   head: () => ({
     meta: [
-      { title: "Chat · TALK" },
+      { title: "Chat · Dot" },
       { name: "description", content: "Private conversation." },
-      { property: "og:title", content: "Chat · TALK" },
+      { property: "og:title", content: "Chat · Dot" },
       { property: "og:description", content: "Private conversation." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -63,6 +64,15 @@ function dayLabel(iso: string) {
 
 type Pending = { id: string; label: string };
 
+function useTick(ms: number) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), ms);
+    return () => clearInterval(t);
+  }, [ms]);
+  return now;
+}
+
 function ChatPage() {
   const { userId: otherId } = Route.useParams();
   const navigate = useNavigate();
@@ -83,6 +93,7 @@ function ChatPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmAll, setConfirmAll] = useState(false);
   const [confirmSel, setConfirmSel] = useState(false);
+  const now = useTick(30_000);
   const [pending, setPending] = useState<Pending[]>([]);
   const [composerH, setComposerH] = useState(72);
   const kb = useKeyboardOffset();
@@ -106,6 +117,25 @@ function ChatPage() {
       document.body.style.overflow = "";
     };
   }, []);
+
+  // Mark their messages as seen while this chat is actually on screen and unlocked.
+  const hasUnseen = messages.some((m) => m.sender_id === otherId && !m.seen_at);
+  useEffect(() => {
+    if (!hasUnseen || talk.locked) return;
+    const run = () => {
+      if (document.visibilityState !== "visible") return;
+      void supabase.rpc("mark_seen", { _other: otherId }).then(() => {
+        const at = new Date().toISOString();
+        qc.setQueryData<Message[]>(messagesKey(otherId), (old) =>
+          old?.map((m) => (m.sender_id === otherId && !m.seen_at ? { ...m, seen_at: at } : m)),
+        );
+        void qc.invalidateQueries({ queryKey: ["unread", me] });
+      });
+    };
+    run();
+    document.addEventListener("visibilitychange", run);
+    return () => document.removeEventListener("visibilitychange", run);
+  }, [hasUnseen, talk.locked, otherId, me, qc]);
 
   const scrollToBottom = useCallback((smooth = false) => {
     const el = listRef.current;
@@ -180,33 +210,52 @@ function ChatPage() {
     if (paths.length) await supabase.storage.from("chat-media").remove(paths);
   };
 
-  const deleteSelected = async () => {
-    const ids = [...selected];
-    const rows = messages.filter((m) => selected.has(m.id));
-    const { error } = await supabase.from("messages").delete().in("id", ids);
-    if (error) {
-      toast("Couldn't delete");
-      return;
-    }
-    qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !selected.has(m.id)));
-    void removeMedia(rows);
-    void qc.invalidateQueries({ queryKey: ["recent", me] });
+  const selectedRows = messages.filter((m) => selected.has(m.id));
+  // "Delete for Everyone" only while every chosen message is yours and still unseen.
+  const canDeleteForEveryone = selectedRows.length > 0 && selectedRows.every((m) => m.sender_id === me && !m.seen_at);
+
+  const endSelection = () => {
     setSelected(new Set());
     setSelectMode(false);
   };
 
-  const deleteAll = async () => {
-    const rows = messages;
-    const { error } = await supabase
-      .from("messages")
-      .delete()
-      .or(`and(sender_id.eq.${me},recipient_id.eq.${otherId}),and(sender_id.eq.${otherId},recipient_id.eq.${me})`);
+  const deleteForEveryone = async () => {
+    const ids = selectedRows.map((m) => m.id);
+    const { data, error } = await supabase.from("messages").delete().in("id", ids).select("id");
     if (error) {
       toast("Couldn't delete");
       return;
     }
-    qc.setQueryData<Message[]>(messagesKey(otherId), []);
-    void removeMedia(rows);
+    const gone = new Set((data ?? []).map((r) => r.id));
+    if (gone.size < ids.length) toast("Some messages were already seen, so they were kept.");
+    qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !gone.has(m.id)));
+    void removeMedia(selectedRows.filter((m) => gone.has(m.id)));
+    void qc.invalidateQueries({ queryKey: ["recent", me] });
+    endSelection();
+  };
+
+  const deleteForMe = async () => {
+    const ids = selectedRows.map((m) => m.id);
+    const { error } = await supabase.rpc("hide_messages", { _ids: ids });
+    if (error) {
+      toast("Couldn't delete");
+      return;
+    }
+    const hidden = new Set(ids);
+    qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !hidden.has(m.id)));
+    void qc.invalidateQueries({ queryKey: ["recent", me] });
+    void qc.invalidateQueries({ queryKey: ["unread", me] });
+    endSelection();
+  };
+
+  // Clears only the messages you sent, from your own view. Their messages stay.
+  const deleteAll = async () => {
+    const { error } = await supabase.rpc("hide_all_sent", { _other: otherId });
+    if (error) {
+      toast("Couldn't delete");
+      return;
+    }
+    qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => m.sender_id !== me));
     void qc.invalidateQueries({ queryKey: ["recent", me] });
   };
 
@@ -219,6 +268,7 @@ function ChatPage() {
       return n;
     });
 
+  const lastMineId = [...messages].reverse().find((m) => m.sender_id === me)?.id;
   const statusLine = isTyping ? `${peer?.display_name ?? "They"} is typing...` : isOnline ? "Online" : "Offline";
   const callDisabled = !isOnline || !!call;
 
@@ -297,6 +347,7 @@ function ChatPage() {
             <p className="py-16 text-center text-sm text-muted-foreground">Say hi to {peer?.display_name ?? "them"}.</p>
           ) : (
             messages.map((m, i) => {
+              const isLastMine = m.id === lastMineId;
               const showDay = i === 0 || new Date(messages[i - 1]!.created_at).toDateString() !== new Date(m.created_at).toDateString();
               const mine = m.sender_id === me;
               return (
@@ -317,8 +368,17 @@ function ChatPage() {
                       setSelectMode(true);
                       setSelected((s) => new Set(s).add(m.id));
                     }}
-                    onTap={() => mine && toggle(m.id)}
+                    onTap={() => toggle(m.id)}
                   />
+                  {isLastMine && !selectMode && (
+                    <p className="px-4 pb-1 pt-0.5 text-right text-[11px] font-medium text-muted-foreground" aria-live="polite">
+                      {m.seen_at ? (
+                        <span className="text-primary">Seen {ago(m.seen_at, now)}</span>
+                      ) : (
+                        <>Sent {ago(m.created_at, now)}</>
+                      )}
+                    </p>
+                  )}
                 </Fragment>
               );
             })
@@ -357,8 +417,10 @@ function ChatPage() {
       <AlertDialog open={confirmAll} onOpenChange={setConfirmAll}>
         <AlertDialogContent className="rounded-3xl border-border bg-popover">
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete all messages?</AlertDialogTitle>
-            <AlertDialogDescription>This clears the whole chat for both of you.</AlertDialogDescription>
+            <AlertDialogTitle>Delete all your messages?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Messages you sent are removed from your view. {peer?.display_name ?? "They"} will still see them, and their messages to you stay.
+            </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
@@ -369,17 +431,24 @@ function ChatPage() {
         </AlertDialogContent>
       </AlertDialog>
       <AlertDialog open={confirmSel} onOpenChange={setConfirmSel}>
-        <AlertDialogContent className="rounded-3xl border-border bg-popover">
+        <AlertDialogContent className="max-w-[360px] rounded-3xl border-border bg-popover">
           <AlertDialogHeader>
             <AlertDialogTitle>Delete {selected.size} message{selected.size === 1 ? "" : "s"}?</AlertDialogTitle>
-            <AlertDialogDescription>They will disappear for both of you.</AlertDialogDescription>
+            {!canDeleteForEveryone && selectedRows.some((m) => m.sender_id === me) && (
+              <AlertDialogDescription>Seen messages can only be deleted for you.</AlertDialogDescription>
+            )}
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction className="bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => void deleteSelected()}>
-              Delete
+          <div className="grid gap-2">
+            {canDeleteForEveryone && (
+              <AlertDialogAction className="h-11 rounded-xl bg-destructive text-destructive-foreground hover:bg-destructive/90" onClick={() => void deleteForEveryone()}>
+                Delete for Everyone
+              </AlertDialogAction>
+            )}
+            <AlertDialogAction className="h-11 rounded-xl bg-secondary text-destructive hover:bg-accent" onClick={() => void deleteForMe()}>
+              Delete for Me
             </AlertDialogAction>
-          </AlertDialogFooter>
+            <AlertDialogCancel className="mt-0 h-11 rounded-xl">Cancel</AlertDialogCancel>
+          </div>
         </AlertDialogContent>
       </AlertDialog>
     </div>

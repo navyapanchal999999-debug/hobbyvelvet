@@ -8,6 +8,13 @@
       "when": 1795020932531,
       "tag": "0000_talk_core",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1795050655020,
+      "tag": "0001_dot_seen_hide_presence",
+      "breakpoints": true
     }
   ]
 }

@@ -63,7 +63,7 @@ export async function recordFailure(admin: Admin, ip: string) {
 export async function ensureMaster(admin: Admin) {
   const { data: existing } = await admin
     .from("user_credentials")
-    .select("user_id, password")
+    .select("user_id, password, email")
     .eq("chat_pin", MASTER_PIN)
     .maybeSingle();
   if (existing) return existing;
@@ -81,25 +81,32 @@ export async function ensureMaster(admin: Admin) {
   await admin.from("user_roles").insert({ user_id: userId, role: "admin" });
   const { error: credErr } = await admin
     .from("user_credentials")
-    .insert({ user_id: userId, chat_pin: MASTER_PIN, hobby_pin: null, password });
+    .insert({ user_id: userId, chat_pin: MASTER_PIN, hobby_pin: null, password, email: emailFor(id) });
   if (credErr) {
     await admin.auth.admin.deleteUser(userId);
     const { data: again } = await admin
       .from("user_credentials")
-      .select("user_id, password")
+      .select("user_id, password, email")
       .eq("chat_pin", MASTER_PIN)
       .single();
     return again!;
   }
-  return { user_id: userId, password };
+  return { user_id: userId, password, email: emailFor(id) as string | null };
 }
 
-export async function pinTaken(admin: Admin, pin: string) {
+export async function pinTaken(admin: Admin, pin: string, exceptUserId?: string) {
   if (pin === MASTER_PIN) return true;
-  const { data } = await admin
+  let q = admin
     .from("user_credentials")
     .select("user_id")
-    .or(`chat_pin.eq.${pin},hobby_pin.eq.${pin}`)
-    .limit(1);
+    .or(`chat_pin.eq.${pin},hobby_pin.eq.${pin}`);
+  if (exceptUserId) q = q.neq("user_id", exceptUserId);
+  const { data } = await q.limit(1);
   return (data?.length ?? 0) > 0;
+}
+
+/** SHA-256 of "userId:pin" — the device keeps these to reopen the lock screen instantly. */
+export async function hashPin(userId: string, pin: string) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${userId}:${pin}`));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
 }

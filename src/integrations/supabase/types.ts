@@ -18,28 +18,37 @@ export type Database = {
         Row: {
           body: string | null
           created_at: string
+          deleted_by_recipient: boolean
+          deleted_by_sender: boolean
           id: string
           kind: string
           media_path: string | null
           recipient_id: string
+          seen_at: string | null
           sender_id: string
         }
         Insert: {
           body?: string | null
           created_at?: string
+          deleted_by_recipient?: boolean
+          deleted_by_sender?: boolean
           id?: string
           kind?: string
           media_path?: string | null
           recipient_id: string
+          seen_at?: string | null
           sender_id: string
         }
         Update: {
           body?: string | null
           created_at?: string
+          deleted_by_recipient?: boolean
+          deleted_by_sender?: boolean
           id?: string
           kind?: string
           media_path?: string | null
           recipient_id?: string
+          seen_at?: string | null
           sender_id?: string
         }
         Relationships: [
@@ -77,6 +86,32 @@ export type Database = {
         }
         Relationships: []
       }
+      presence: {
+        Row: {
+          last_seen: string
+          online: boolean
+          user_id: string
+        }
+        Insert: {
+          last_seen?: string
+          online?: boolean
+          user_id: string
+        }
+        Update: {
+          last_seen?: string
+          online?: boolean
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "presence_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: true
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_path: string | null
@@ -111,6 +146,7 @@ export type Database = {
         Row: {
           chat_pin: string
           created_at: string
+          email: string | null
           hobby_pin: string | null
           password: string
           user_id: string
@@ -118,6 +154,7 @@ export type Database = {
         Insert: {
           chat_pin: string
           created_at?: string
+          email?: string | null
           hobby_pin?: string | null
           password: string
           user_id: string
@@ -125,6 +162,7 @@ export type Database = {
         Update: {
           chat_pin?: string
           created_at?: string
+          email?: string | null
           hobby_pin?: string | null
           password?: string
           user_id?: string
@@ -162,6 +200,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      go_offline: { Args: never; Returns: undefined }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -169,6 +208,10 @@ export type Database = {
         }
         Returns: boolean
       }
+      heartbeat: { Args: never; Returns: undefined }
+      hide_all_sent: { Args: { _other: string }; Returns: undefined }
+      hide_messages: { Args: { _ids: string[] }; Returns: undefined }
+      mark_seen: { Args: { _other: string }; Returns: number }
       master_user_id: { Args: never; Returns: string }
     }
     Enums: {

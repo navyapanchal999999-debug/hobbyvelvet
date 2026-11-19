@@ -1,11 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
 import type { Tables } from "@/integrations/supabase/types";
 import { playTone } from "./sound";
 import { lockSuppressed } from "./lock-guard";
+import { consumeUnlocked, sendOffline } from "./pin-cache";
 
 export type Profile = Tables<"profiles">;
 export type Message = Tables<"messages">;
@@ -25,8 +25,14 @@ type TalkCtx = {
   subscribeSignals: (fn: (s: Signal) => void) => () => void;
   activeChat: string | null;
   setActiveChat: (id: string | null) => void;
+  locked: boolean;
   lock: () => void;
+  unlock: () => void;
 };
+
+/** Seen as online while the app is open (even locked or in a background tab). */
+const STALE_MS = 5 * 60_000;
+const HEARTBEAT_MS = 25_000;
 
 const Ctx = createContext<TalkCtx | null>(null);
 
@@ -38,11 +44,17 @@ export function useTalk() {
 
 export const messagesKey = (otherId: string) => ["messages", otherId] as const;
 
+/** Messages hidden with "Delete for Me" never come back for that person. */
+export const visibleTo = (me: string, m: Message) =>
+  m.sender_id === me ? !m.deleted_by_sender : !m.deleted_by_recipient;
+
 export async function fetchConversation(me: string, other: string) {
   const { data, error } = await supabase
     .from("messages")
     .select("*")
-    .or(`and(sender_id.eq.${me},recipient_id.eq.${other}),and(sender_id.eq.${other},recipient_id.eq.${me})`)
+    .or(
+      `and(sender_id.eq.${me},recipient_id.eq.${other},deleted_by_sender.eq.false),and(sender_id.eq.${other},recipient_id.eq.${me},deleted_by_recipient.eq.false)`,
+    )
     .order("created_at", { ascending: false })
     .limit(500);
   if (error) throw error;
@@ -51,8 +63,9 @@ export async function fetchConversation(me: string, other: string) {
 
 export function TalkProvider({ userId, children }: { userId: string; children: ReactNode }) {
   const qc = useQueryClient();
-  const navigate = useNavigate();
-  const [online, setOnline] = useState<Set<string>>(new Set());
+  const [presence, setPresence] = useState<Record<string, { online: boolean; last_seen: string }>>({});
+  const [presenceTick, setPresenceTick] = useState(0);
+  const [locked, setLocked] = useState(() => !consumeUnlocked());
   const [typing, setTyping] = useState<Record<string, number>>({});
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const listeners = useRef(new Set<(s: Signal) => void>());
@@ -84,10 +97,12 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
   const toneRef = useRef(1);
   toneRef.current = meQ.data?.notification_tone ?? 1;
 
+  // Locking only covers the screen with the PIN pad: the person stays signed in and online.
   const lock = useCallback(() => {
-    void navigate({ to: "/" });
-    void supabase.auth.signOut({ scope: "local" });
-  }, [navigate]);
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    setLocked(true);
+  }, []);
+  const unlock = useCallback(() => setLocked(false), []);
 
   // Lock the moment the app is hidden (tab switch, minimise, screen off).
   useEffect(() => {
@@ -95,12 +110,39 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       if (document.visibilityState === "hidden" && !lockSuppressed()) lock();
     };
     document.addEventListener("visibilitychange", onHide);
-    window.addEventListener("pagehide", onHide);
-    return () => {
-      document.removeEventListener("visibilitychange", onHide);
-      window.removeEventListener("pagehide", onHide);
-    };
+    return () => document.removeEventListener("visibilitychange", onHide);
   }, [lock]);
+
+  // Online status: a heartbeat while the page exists; offline only when the tab is closed.
+  useEffect(() => {
+    let token: string | null = null;
+    void supabase.auth.getSession().then(({ data }) => {
+      token = data.session?.access_token ?? null;
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) => {
+      if (session?.user.id === userId) token = session.access_token;
+    });
+    const beat = () => void supabase.rpc("heartbeat");
+    beat();
+    const t = setInterval(beat, HEARTBEAT_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") beat();
+    };
+    const onPageHide = () => sendOffline(token);
+    const onPageShow = (e: PageTransitionEvent) => {
+      if (e.persisted) beat();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      clearInterval(t);
+      sub.subscription.unsubscribe();
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [userId]);
 
   // Live messages: new, sent from another device, and deletions.
   useEffect(() => {
@@ -110,6 +152,7 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
         old ? (old.some((x) => x.id === m.id) ? old : [...old, m]) : old,
       );
       void qc.invalidateQueries({ queryKey: ["recent", userId] });
+      if (incoming) void qc.invalidateQueries({ queryKey: ["unread", userId] });
       if (incoming) {
         playTone(toneRef.current);
         setTyping((t) => {
@@ -119,6 +162,14 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
           return n;
         });
       }
+    };
+    const updMsg = (m: Message) => {
+      const other = m.sender_id === userId ? m.recipient_id : m.sender_id;
+      qc.setQueryData<Message[]>(messagesKey(other), (old) =>
+        old?.flatMap((x) => (x.id === m.id ? (visibleTo(userId, m) ? [m] : []) : [x])),
+      );
+      void qc.invalidateQueries({ queryKey: ["recent", userId] });
+      void qc.invalidateQueries({ queryKey: ["unread", userId] });
     };
     const ch = supabase
       .channel(`talk-msgs-${userId}-${Math.random().toString(36).slice(2)}`)
@@ -132,11 +183,22 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
         { event: "INSERT", schema: "public", table: "messages", filter: `sender_id=eq.${userId}` },
         (p) => addMsg(p.new as Message, false),
       )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "messages", filter: `sender_id=eq.${userId}` },
+        (p) => updMsg(p.new as Message),
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "messages", filter: `recipient_id=eq.${userId}` },
+        (p) => updMsg(p.new as Message),
+      )
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, (p) => {
         const id = (p.old as { id?: string }).id;
         if (!id) return;
         qc.setQueriesData<Message[]>({ queryKey: ["messages"] }, (old) => old?.filter((m) => m.id !== id));
         void qc.invalidateQueries({ queryKey: ["recent", userId] });
+        void qc.invalidateQueries({ queryKey: ["unread", userId] });
       })
       .subscribe();
     return () => {
@@ -144,19 +206,47 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
     };
   }, [userId, qc]);
 
-  // Presence: who has the app open and unlocked right now.
+  // Presence rows + live updates; profile edits by others show up live too.
   useEffect(() => {
-    const ch = supabase.channel("talk-presence", { config: { presence: { key: userId } } });
-    ch.on("presence", { event: "sync" }, () => {
-      setOnline(new Set(Object.keys(ch.presenceState())));
-    }).subscribe((status) => {
-      if (status === "SUBSCRIBED") void ch.track({ at: Date.now() });
-    });
+    let alive = true;
+    void supabase
+      .from("presence")
+      .select("user_id, online, last_seen")
+      .then(({ data }) => {
+        if (!alive || !data) return;
+        setPresence(Object.fromEntries(data.map((r) => [r.user_id, { online: r.online, last_seen: r.last_seen }])));
+      });
+    const ch = supabase
+      .channel(`talk-presence-${userId}-${Math.random().toString(36).slice(2)}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "presence" }, (p) => {
+        const r = (p.new ?? {}) as { user_id?: string; online?: boolean; last_seen?: string };
+        if (!r.user_id) return;
+        setPresence((cur) => ({ ...cur, [r.user_id!]: { online: !!r.online, last_seen: r.last_seen ?? new Date().toISOString() } }));
+      })
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, (p) => {
+        const id = (p.new as { id?: string }).id;
+        void qc.invalidateQueries({ queryKey: ["contacts", userId] });
+        if (id === userId) void qc.invalidateQueries({ queryKey: ["me", userId] });
+      })
+      .subscribe();
+    const t = setInterval(() => setPresenceTick((n) => n + 1), 30_000);
     return () => {
-      void ch.untrack();
+      alive = false;
+      clearInterval(t);
       void supabase.removeChannel(ch);
     };
-  }, [userId]);
+  }, [userId, qc]);
+
+  const online = useMemo(() => {
+    const now = Date.now();
+    const set = new Set<string>([userId]);
+    for (const [id, r] of Object.entries(presence)) {
+      if (r.online && now - new Date(r.last_seen).getTime() < STALE_MS) set.add(id);
+    }
+    return set;
+    // presenceTick re-evaluates staleness over time
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [presence, presenceTick, userId]);
 
   // Personal inbox for typing and call signals.
   useEffect(() => {
@@ -243,9 +333,11 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       subscribeSignals,
       activeChat,
       setActiveChat,
+      locked,
       lock,
+      unlock,
     }),
-    [userId, meQ.data, masterQ.data, contacts, contactsQ.isLoading, online, typing, sendTyping, sendSignal, subscribeSignals, activeChat, lock],
+    [userId, meQ.data, masterQ.data, contacts, contactsQ.isLoading, online, typing, sendTyping, sendSignal, subscribeSignals, activeChat, locked, lock, unlock],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

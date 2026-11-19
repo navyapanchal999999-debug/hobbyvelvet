@@ -1,16 +1,18 @@
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useEffect, useState } from "react";
-import { PinPad } from "@/components/talk/PinPad";
-import { supabase } from "@/integrations/supabase/client";
+import { useEffect } from "react";
+import { PinScreen } from "@/components/talk/PinScreen";
 import { loginWithPin } from "@/lib/talk.functions";
+import { destPath, markUnlocked } from "@/lib/pin-cache";
+import { resolvePin } from "@/lib/unlock";
 
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "TALK" },
+      { title: "Dot" },
       { name: "description", content: "Enter your PIN to continue." },
-      { property: "og:title", content: "TALK" },
+      { property: "og:title", content: "Dot" },
       { property: "og:description", content: "Enter your PIN to continue." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },
@@ -19,88 +21,27 @@ export const Route = createFileRoute("/")({
   component: Home,
 });
 
-function useNow() {
-  const [now, setNow] = useState<Date | null>(null);
-  useEffect(() => {
-    setNow(new Date());
-    const t = setInterval(() => setNow(new Date()), 15_000);
-    return () => clearInterval(t);
-  }, []);
-  return now;
-}
-
 function Home() {
-  const navigate = useNavigate();
+  const router = useRouter();
+  const qc = useQueryClient();
   const login = useServerFn(loginWithPin);
-  const now = useNow();
-  const [pin, setPin] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [shake, setShake] = useState(0);
 
-  // Arriving here always means "locked".
+  // Fetch the next screens' code while the PIN is typed, so opening is instant.
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
-      if (data.session) void supabase.auth.signOut({ scope: "local" });
-    });
-  }, []);
-
-  const submit = async (value: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await login({ data: { pin: value } });
-      if (!res.ok) {
-        setError(res.error);
-        setShake((n) => n + 1);
-        navigator.vibrate?.([30, 40, 30]);
-        setTimeout(() => setPin(""), 420);
-        return;
-      }
-      const { error: sErr } = await supabase.auth.setSession({
-        access_token: res.access_token,
-        refresh_token: res.refresh_token,
-      });
-      if (sErr) throw sErr;
-      const to = res.destination === "master" ? "/master" : res.destination === "hobby" ? "/hobby" : "/chats";
-      await navigate({ to, replace: true });
-    } catch {
-      setError("Couldn't connect. Try again.");
-      setShake((n) => n + 1);
-      setTimeout(() => setPin(""), 420);
-    } finally {
-      setBusy(false);
+    for (const path of ["/chats", "/hobby", "/master"] as const) {
+      const route = router.routesByPath[path];
+      if (route) void router.loadRouteChunk(route).catch(() => undefined);
     }
-  };
+  }, [router]);
 
   return (
-    <main className="aura fixed inset-0 flex select-none flex-col items-center justify-between overflow-hidden px-6 pb-[max(env(safe-area-inset-bottom),2rem)] pt-[max(env(safe-area-inset-top),3.5rem)]">
-      <div className="flex flex-col items-center text-center">
-        <p className="font-display text-[64px] font-light leading-none tracking-tight tabular-nums">
-          {now ? now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "\u00A0"}
-        </p>
-        <p className="mt-2 text-sm text-muted-foreground">
-          {now ? now.toLocaleDateString([], { weekday: "long", day: "numeric", month: "long" }) : "\u00A0"}
-        </p>
-      </div>
-
-      <div className="flex flex-col items-center">
-        <p className="mb-6 h-5 text-sm font-medium text-muted-foreground" aria-live="polite">
-          {busy ? "Unlocking…" : error ? <span className="text-destructive">{error}</span> : "Enter PIN"}
-        </p>
-        <PinPad
-          key={shake}
-          value={pin}
-          onChange={(v) => {
-            setError(null);
-            setPin(v);
-          }}
-          onComplete={(v) => void submit(v)}
-          disabled={busy}
-          error={!!error}
-        />
-      </div>
-      <div className="h-4" />
-    </main>
+    <PinScreen
+      onSubmit={async (pin) => {
+        const r = await resolvePin(pin, login, qc);
+        if (!r.ok) return r.error;
+        markUnlocked();
+        await router.navigate({ to: destPath(r.dest), replace: true });
+      }}
+    />
   );
 }

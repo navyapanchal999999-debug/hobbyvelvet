@@ -7,6 +7,7 @@ import {
   emailFor,
   ensureMaster,
   getAdmin,
+  hashPin,
   issueSession,
   pinTaken,
   randomPassword,
@@ -16,12 +17,26 @@ import {
 
 const pinSchema = z.string().regex(/^\d{4}$/);
 
+type Dest = "master" | "chat" | "hobby";
+type MiniProfile = { id: string; display_name: string; avatar_path: string | null };
+
 export type LoginResult =
-  | { ok: true; destination: "master" | "chat" | "hobby"; access_token: string; refresh_token: string }
+  | {
+      ok: true;
+      destination: Dest;
+      userId: string;
+      /** Tokens are only sent when the device must switch to another person. */
+      access_token: string | null;
+      refresh_token: string | null;
+      hashes: Record<string, Dest>;
+      profile: MiniProfile | null;
+    }
   | { ok: false; error: string };
 
 export const loginWithPin = createServerFn({ method: "POST" })
-  .inputValidator((input: { pin: string }) => z.object({ pin: pinSchema }).parse(input))
+  .inputValidator((input: { pin: string; currentUserId?: string | null }) =>
+    z.object({ pin: pinSchema, currentUserId: z.string().uuid().nullish() }).parse(input),
+  )
   .handler(async ({ data }): Promise<LoginResult> => {
     const admin = await getAdmin();
     const ip =
@@ -29,35 +44,93 @@ export const loginWithPin = createServerFn({ method: "POST" })
       getRequestHeader("x-forwarded-for")?.split(",")[0]?.trim() ??
       "unknown";
 
-    if (await tooManyAttempts(admin, ip)) {
-      return { ok: false, error: "Too many tries. Wait a few minutes." };
-    }
+    const isMasterPin = data.pin === MASTER_PIN;
+    // Run the throttle check and the PIN lookup together to keep unlock under a second.
+    const [blocked, credRes] = await Promise.all([
+      tooManyAttempts(admin, ip),
+      isMasterPin
+        ? ensureMaster(admin).then((m) => ({ data: { ...m, chat_pin: MASTER_PIN, hobby_pin: null as string | null } }))
+        : admin
+            .from("user_credentials")
+            .select("user_id, password, chat_pin, hobby_pin, email")
+            .or(`chat_pin.eq.${data.pin},hobby_pin.eq.${data.pin}`)
+            .maybeSingle(),
+    ]);
+    if (blocked) return { ok: false, error: "Too many tries. Wait a few minutes." };
 
-    if (data.pin === MASTER_PIN) {
-      const master = await ensureMaster(admin);
-      const tokens = await issueSession(await authEmail(admin, master.user_id), master.password);
-      return { ok: true, destination: "master", ...tokens };
-    }
-
-    const { data: cred } = await admin
-      .from("user_credentials")
-      .select("user_id, password, chat_pin, hobby_pin")
-      .or(`chat_pin.eq.${data.pin},hobby_pin.eq.${data.pin}`)
-      .maybeSingle();
-
+    const cred = credRes.data;
     if (!cred) {
       await recordFailure(admin, ip);
       return { ok: false, error: "Wrong PIN" };
     }
 
-    const tokens = await issueSession(await authEmail(admin, cred.user_id), cred.password);
-    return { ok: true, destination: cred.chat_pin === data.pin ? "chat" : "hobby", ...tokens };
+    const destination: Dest = isMasterPin ? "master" : cred.chat_pin === data.pin ? "chat" : "hobby";
+    const sameUser = data.currentUserId === cred.user_id;
+
+    const [tokens, profileRes, hashes] = await Promise.all([
+      sameUser
+        ? Promise.resolve({ access_token: null, refresh_token: null })
+        : (async () => {
+            const email = cred.email ?? (await authEmail(admin, cred.user_id));
+            if (!cred.email) await admin.from("user_credentials").update({ email }).eq("user_id", cred.user_id);
+            return issueSession(email, cred.password);
+          })(),
+      admin.from("profiles").select("id, display_name, avatar_path").eq("id", cred.user_id).maybeSingle(),
+      (async () => {
+        const h: Record<string, Dest> = {};
+        h[await hashPin(cred.user_id, cred.chat_pin)] = isMasterPin ? "master" : "chat";
+        if (cred.hobby_pin) h[await hashPin(cred.user_id, cred.hobby_pin)] = "hobby";
+        return h;
+      })(),
+    ]);
+
+    return { ok: true, destination, userId: cred.user_id, ...tokens, hashes, profile: profileRes.data ?? null };
   });
 
 async function authEmail(admin: Awaited<ReturnType<typeof getAdmin>>, userId: string) {
   const { data } = await admin.auth.admin.getUserById(userId);
   return data.user?.email ?? emailFor(userId);
 }
+
+const pinsSchema = z.object({ chatPin: pinSchema, hobbyPin: pinSchema });
+
+/** A person changes their own Chat PIN and Hobby PIN. */
+export const updateMyPins = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: z.infer<typeof pinsSchema>) => pinsSchema.parse(input))
+  .handler(async ({ data, context }): Promise<{ ok: true; hashes: Record<string, Dest> } | { ok: false; error: string }> => {
+    const { data: isAdmin } = await context.supabase.rpc("has_role", { _user_id: context.userId, _role: "admin" });
+    if (isAdmin) return { ok: false, error: "The master PIN can't be changed." };
+    if (data.chatPin === data.hobbyPin) return { ok: false, error: "Chat PIN and Hobby PIN must be different." };
+    const admin = await getAdmin();
+    if (await pinTaken(admin, data.chatPin, context.userId)) return { ok: false, error: "That Chat PIN is already in use." };
+    if (await pinTaken(admin, data.hobbyPin, context.userId)) return { ok: false, error: "That Hobby PIN is already in use." };
+    const { error } = await admin
+      .from("user_credentials")
+      .update({ chat_pin: data.chatPin, hobby_pin: data.hobbyPin })
+      .eq("user_id", context.userId);
+    if (error) return { ok: false, error: "Couldn't save the new PINs." };
+    return {
+      ok: true,
+      hashes: {
+        [await hashPin(context.userId, data.chatPin)]: "chat",
+        [await hashPin(context.userId, data.hobbyPin)]: "hobby",
+      },
+    };
+  });
+
+/** Current PINs of the signed-in person (to prefill the profile page). */
+export const getMyPins = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const admin = await getAdmin();
+    const { data } = await admin
+      .from("user_credentials")
+      .select("chat_pin, hobby_pin")
+      .eq("user_id", context.userId)
+      .maybeSingle();
+    return { chatPin: data?.chat_pin ?? "", hobbyPin: data?.hobby_pin ?? "" };
+  });
 
 async function assertMaster(context: { supabase: any; userId: string }) {
   const { data: isAdmin } = await context.supabase.rpc("has_role", {
@@ -117,8 +190,9 @@ export const createTalkUser = createServerFn({ method: "POST" })
     if (await pinTaken(admin, data.hobbyPin)) return { ok: false, error: "That Hobby PIN is already in use." };
 
     const password = randomPassword();
+    const email = emailFor(crypto.randomUUID());
     const { data: created, error } = await admin.auth.admin.createUser({
-      email: emailFor(crypto.randomUUID()),
+      email,
       password,
       email_confirm: true,
     });
@@ -139,6 +213,7 @@ export const createTalkUser = createServerFn({ method: "POST" })
           chat_pin: data.chatPin,
           hobby_pin: data.hobbyPin,
           password,
+          email,
         });
     if (pErr || cErr) {
       await admin.auth.admin.deleteUser(id);

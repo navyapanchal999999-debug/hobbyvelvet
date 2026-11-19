@@ -3,6 +3,7 @@ import { Check, Pause, Play, X } from "lucide-react";
 import { useSignedUrl } from "@/lib/media";
 import type { Message } from "@/lib/talk-context";
 import { cn } from "@/lib/utils";
+import { fmtTime } from "@/lib/time";
 
 function fmt(sec: number) {
   if (!isFinite(sec)) return "0:00";
@@ -104,7 +105,7 @@ export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTa
   const [viewer, setViewer] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const moved = useRef(false);
-  const time = new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = fmtTime(m.created_at);
   const isMedia = m.kind === "image" || m.kind === "video";
 
   return (
@@ -118,13 +119,11 @@ export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTa
         if (selectMode) onTap();
       }}
       onContextMenu={(e) => {
-        if (!mine) return;
         e.preventDefault();
         onLongPress();
       }}
       onPointerDown={() => {
         moved.current = false;
-        if (!mine) return;
         timer.current = setTimeout(() => {
           if (!moved.current) {
             navigator.vibrate?.(15);
@@ -139,7 +138,7 @@ export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTa
       onPointerUp={() => timer.current && clearTimeout(timer.current)}
       onPointerCancel={() => timer.current && clearTimeout(timer.current)}
     >
-      {selectMode && mine && (
+      {selectMode && (
         <span
           className={cn(
             "mr-2 mt-2 flex h-5 w-5 shrink-0 items-center justify-center self-start rounded-full border",
