@@ -21,9 +21,9 @@ import { cn } from "@/lib/utils";
 export const Route = createFileRoute("/_authenticated/master")({
   head: () => ({
     meta: [
-      { title: "Manage users · TALK" },
+      { title: "Manage users · Dot" },
       { name: "description", content: "Create and remove people." },
-      { property: "og:title", content: "Manage users · TALK" },
+      { property: "og:title", content: "Manage users · Dot" },
       { property: "og:description", content: "Create and remove people." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },

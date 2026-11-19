@@ -26,12 +26,13 @@ export function LockOverlay() {
             markUnlocked();
             await router.navigate({ to: destPath(r.dest), replace: true });
             await router.invalidate();
-            return;
+            return undefined;
           }
           unlock();
           const inHobby = path.startsWith("/hobby");
           if (r.dest === "hobby" && !inHobby) void router.navigate({ to: "/hobby" });
           else if (r.dest !== "hobby" && inHobby) void router.navigate({ to: isMaster || r.dest === "master" ? "/master" : "/chats" });
+          return undefined;
         }}
       />
     </div>

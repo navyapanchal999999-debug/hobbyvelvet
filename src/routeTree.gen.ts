@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/route'
 import { Route as AuthenticatedChatsRouteImport } from './routes/_authenticated/chats'
+import { Route as AuthenticatedHobbyRouteImport } from './routes/_authenticated/hobby'
 import { Route as AuthenticatedMasterRouteImport } from './routes/_authenticated/master'
 import { Route as AuthenticatedChatUserIdRouteImport } from './routes/_authenticated/chat.$userId'
 
@@ -29,6 +30,11 @@ const AuthenticatedChatsRoute = AuthenticatedChatsRouteImport.update({
   path: '/chats',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
+const AuthenticatedHobbyRoute = AuthenticatedHobbyRouteImport.update({
+  id: '/hobby',
+  path: '/hobby',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
 const AuthenticatedMasterRoute = AuthenticatedMasterRouteImport.update({
   id: '/master',
   path: '/master',
@@ -43,12 +49,14 @@ const AuthenticatedChatUserIdRoute = AuthenticatedChatUserIdRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/chats': typeof AuthenticatedChatsRoute
+  '/hobby': typeof AuthenticatedHobbyRoute
   '/master': typeof AuthenticatedMasterRoute
   '/chat/$userId': typeof AuthenticatedChatUserIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/chats': typeof AuthenticatedChatsRoute
+  '/hobby': typeof AuthenticatedHobbyRoute
   '/master': typeof AuthenticatedMasterRoute
   '/chat/$userId': typeof AuthenticatedChatUserIdRoute
 }
@@ -57,19 +65,21 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/_authenticated': typeof AuthenticatedRouteRouteWithChildren
   '/_authenticated/chats': typeof AuthenticatedChatsRoute
+  '/_authenticated/hobby': typeof AuthenticatedHobbyRoute
   '/_authenticated/master': typeof AuthenticatedMasterRoute
   '/_authenticated/chat/$userId': typeof AuthenticatedChatUserIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/chats' | '/master' | '/chat/$userId'
+  fullPaths: '/' | '/chats' | '/hobby' | '/master' | '/chat/$userId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/chats' | '/master' | '/chat/$userId'
+  to: '/' | '/chats' | '/hobby' | '/master' | '/chat/$userId'
   id:
     | '__root__'
     | '/'
     | '/_authenticated'
     | '/_authenticated/chats'
+    | '/_authenticated/hobby'
     | '/_authenticated/master'
     | '/_authenticated/chat/$userId'
   fileRoutesById: FileRoutesById
@@ -102,6 +112,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedChatsRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/hobby': {
+      id: '/_authenticated/hobby'
+      path: '/hobby'
+      fullPath: '/hobby'
+      preLoaderRoute: typeof AuthenticatedHobbyRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/master': {
       id: '/_authenticated/master'
       path: '/master'
@@ -121,12 +138,14 @@ declare module '@tanstack/react-router' {
 
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedChatsRoute: typeof AuthenticatedChatsRoute
+  AuthenticatedHobbyRoute: typeof AuthenticatedHobbyRoute
   AuthenticatedMasterRoute: typeof AuthenticatedMasterRoute
   AuthenticatedChatUserIdRoute: typeof AuthenticatedChatUserIdRoute
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedChatsRoute: AuthenticatedChatsRoute,
+  AuthenticatedHobbyRoute: AuthenticatedHobbyRoute,
   AuthenticatedMasterRoute: AuthenticatedMasterRoute,
   AuthenticatedChatUserIdRoute: AuthenticatedChatUserIdRoute,
 }

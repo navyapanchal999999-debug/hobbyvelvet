@@ -29,8 +29,8 @@ function Home() {
   // Fetch the next screens' code while the PIN is typed, so opening is instant.
   useEffect(() => {
     for (const path of ["/chats", "/hobby", "/master"] as const) {
-      const route = router.routesByPath[path];
-      if (route) void router.loadRouteChunk(route).catch(() => undefined);
+      const route = (router.routesByPath as Record<string, unknown>)[path];
+      if (route) void router.loadRouteChunk(route as never)?.catch?.(() => undefined);
     }
   }, [router]);
 
@@ -41,6 +41,7 @@ function Home() {
         if (!r.ok) return r.error;
         markUnlocked();
         await router.navigate({ to: destPath(r.dest), replace: true });
+        return undefined;
       }}
     />
   );

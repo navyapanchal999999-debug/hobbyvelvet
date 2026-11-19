@@ -10,9 +10,9 @@ import { useTalk, type Message } from "@/lib/talk-context";
 export const Route = createFileRoute("/_authenticated/chats")({
   head: () => ({
     meta: [
-      { title: "Chats · TALK" },
+      { title: "Chats · Dot" },
       { name: "description", content: "Your private conversations." },
-      { property: "og:title", content: "Chats · TALK" },
+      { property: "og:title", content: "Chats · Dot" },
       { property: "og:description", content: "Your private conversations." },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary" },

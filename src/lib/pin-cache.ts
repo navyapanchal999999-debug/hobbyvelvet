@@ -45,8 +45,8 @@ export function consumeUnlocked() {
 /** Mark the person offline even while the page is closing. */
 export function sendOffline(accessToken: string | null | undefined) {
   if (!accessToken) return;
-  const url = import.meta.env.VITE_SUPABASE_URL as string;
-  const key = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY as string;
+  const url = import.meta.env["VITE_SUPABASE_URL"] as string;
+  const key = import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] as string;
   try {
     void fetch(`${url}/rest/v1/rpc/go_offline`, {
       method: "POST",
