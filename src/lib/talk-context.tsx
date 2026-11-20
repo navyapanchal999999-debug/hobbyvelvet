@@ -6,6 +6,7 @@ import type { Tables } from "@/integrations/supabase/types";
 import { playTone } from "./sound";
 import { lockSuppressed } from "./lock-guard";
 import { consumeUnlocked, sendOffline } from "./pin-cache";
+import { summariesKey } from "./chat-summaries";
 
 export type Profile = Tables<"profiles">;
 export type Message = Tables<"messages">;
@@ -61,6 +62,16 @@ export async function fetchConversation(me: string, other: string) {
   return (data ?? []).reverse();
 }
 
+export async function fetchMe(userId: string) {
+  const { data } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
+  return data;
+}
+
+export async function fetchContacts(userId: string) {
+  const { data } = await supabase.from("profiles").select("*").neq("id", userId).order("display_name");
+  return data ?? [];
+}
+
 export function TalkProvider({ userId, children }: { userId: string; children: ReactNode }) {
   const qc = useQueryClient();
   const [presence, setPresence] = useState<Record<string, { online: boolean; last_seen: string }>>({});
@@ -74,10 +85,8 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
 
   const meQ = useQuery({
     queryKey: ["me", userId],
-    queryFn: async () => {
-      const { data } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
-      return data;
-    },
+    queryFn: () => fetchMe(userId),
+    staleTime: 30_000,
   });
   const masterQ = useQuery({
     queryKey: ["isMaster", userId],
@@ -85,13 +94,12 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       const { data } = await supabase.rpc("has_role", { _user_id: userId, _role: "admin" });
       return !!data;
     },
+    staleTime: Infinity,
   });
   const contactsQ = useQuery({
     queryKey: ["contacts", userId],
-    queryFn: async () => {
-      const { data } = await supabase.from("profiles").select("*").neq("id", userId).order("display_name");
-      return data ?? [];
-    },
+    queryFn: () => fetchContacts(userId),
+    staleTime: 30_000,
   });
 
   const toneRef = useRef(1);
@@ -146,13 +154,18 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
 
   // Live messages: new, sent from another device, and deletions.
   useEffect(() => {
+    // Bursts of changes refresh the chat list (last message + unread counts) once.
+    let refreshT: ReturnType<typeof setTimeout> | null = null;
+    const refreshList = () => {
+      if (refreshT) clearTimeout(refreshT);
+      refreshT = setTimeout(() => void qc.invalidateQueries({ queryKey: summariesKey(userId) }), 120);
+    };
     const addMsg = (m: Message, incoming: boolean) => {
       const other = m.sender_id === userId ? m.recipient_id : m.sender_id;
       qc.setQueryData<Message[]>(messagesKey(other), (old) =>
         old ? (old.some((x) => x.id === m.id) ? old : [...old, m]) : old,
       );
-      void qc.invalidateQueries({ queryKey: ["recent", userId] });
-      if (incoming) void qc.invalidateQueries({ queryKey: ["unread", userId] });
+      refreshList();
       if (incoming) {
         playTone(toneRef.current);
         setTyping((t) => {
@@ -168,8 +181,7 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       qc.setQueryData<Message[]>(messagesKey(other), (old) =>
         old?.flatMap((x) => (x.id === m.id ? (visibleTo(userId, m) ? [m] : []) : [x])),
       );
-      void qc.invalidateQueries({ queryKey: ["recent", userId] });
-      void qc.invalidateQueries({ queryKey: ["unread", userId] });
+      refreshList();
     };
     const ch = supabase
       .channel(`talk-msgs-${userId}-${Math.random().toString(36).slice(2)}`)
@@ -197,11 +209,11 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
         const id = (p.old as { id?: string }).id;
         if (!id) return;
         qc.setQueriesData<Message[]>({ queryKey: ["messages"] }, (old) => old?.filter((m) => m.id !== id));
-        void qc.invalidateQueries({ queryKey: ["recent", userId] });
-        void qc.invalidateQueries({ queryKey: ["unread", userId] });
+        refreshList();
       })
       .subscribe();
     return () => {
+      if (refreshT) clearTimeout(refreshT);
       void supabase.removeChannel(ch);
     };
   }, [userId, qc]);
@@ -237,12 +249,17 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
     };
   }, [userId, qc]);
 
+  // Same people online → same Set object, so screens don't re-render for nothing.
+  const onlineRef = useRef<Set<string>>(new Set());
   const online = useMemo(() => {
     const now = Date.now();
     const set = new Set<string>([userId]);
     for (const [id, r] of Object.entries(presence)) {
       if (r.online && now - new Date(r.last_seen).getTime() < STALE_MS) set.add(id);
     }
+    const prev = onlineRef.current;
+    if (prev.size === set.size && [...set].every((id) => prev.has(id))) return prev;
+    onlineRef.current = set;
     return set;
     // presenceTick re-evaluates staleness over time
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -317,7 +334,8 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
     };
   }, []);
 
-  const contacts = contactsQ.data ?? [];
+  const contacts = useMemo(() => contactsQ.data ?? [], [contactsQ.data]);
+  const typingFrom = useMemo(() => new Set(Object.keys(typing)), [typing]);
   const value = useMemo<TalkCtx>(
     () => ({
       userId,
@@ -327,7 +345,7 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       contactsLoading: contactsQ.isLoading,
       profileById: (id) => contacts.find((c) => c.id === id) ?? (meQ.data?.id === id ? meQ.data : undefined),
       online,
-      typingFrom: new Set(Object.keys(typing)),
+      typingFrom,
       sendTyping,
       sendSignal,
       subscribeSignals,
@@ -337,7 +355,7 @@ export function TalkProvider({ userId, children }: { userId: string; children: R
       lock,
       unlock,
     }),
-    [userId, meQ.data, masterQ.data, contacts, contactsQ.isLoading, online, typing, sendTyping, sendSignal, subscribeSignals, activeChat, locked, lock, unlock],
+    [userId, meQ.data, masterQ.data, contacts, contactsQ.isLoading, online, typingFrom, sendTyping, sendSignal, subscribeSignals, activeChat, locked, lock, unlock],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

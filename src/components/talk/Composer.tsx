@@ -9,7 +9,6 @@ const drafts = new Map<string, string>();
 
 type Props = {
   draftKey: string;
-  bottom: number;
   onSendText: (text: string) => void;
   onSendFile: (file: File) => void;
   onSendVoice: (blob: Blob) => void;
@@ -22,7 +21,7 @@ function pickMime() {
   return opts.find((m) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) ?? "";
 }
 
-export function Composer({ draftKey, bottom, onSendText, onSendFile, onSendVoice, onTyping, onHeight }: Props) {
+export function Composer({ draftKey, onSendText, onSendFile, onSendVoice, onTyping, onHeight }: Props) {
   const [text, setText] = useState(() => drafts.get(draftKey) ?? "");
   const [emoji, setEmoji] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -143,10 +142,10 @@ export function Composer({ draftKey, bottom, onSendText, onSendFile, onSendVoice
   return (
     <div
       ref={boxRef}
-      className="fixed inset-x-0 z-30 px-3 pb-[max(env(safe-area-inset-bottom),0.75rem)] transition-[bottom] duration-200 ease-out"
-      style={{ bottom }}
+      // Floats over the chat. Only this box rides up with the keyboard (--kb is set by the page).
+      className="composer-float pointer-events-none absolute inset-x-0 bottom-0 z-30 px-3"
     >
-      <div className="glass mx-auto max-w-2xl overflow-hidden rounded-[28px] shadow-float">
+      <div className="glass pointer-events-auto mx-auto max-w-2xl overflow-hidden rounded-[28px] shadow-float">
         {emoji && !recording && <EmojiPanel onPick={(e) => update(text + e)} />}
         <div className="flex items-end gap-1 p-1.5">
           {recording ? (

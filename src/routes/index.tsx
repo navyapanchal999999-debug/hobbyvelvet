@@ -28,9 +28,10 @@ function Home() {
 
   // Fetch the next screens' code while the PIN is typed, so opening is instant.
   useEffect(() => {
-    for (const path of ["/chats", "/hobby", "/master"] as const) {
-      const route = (router.routesByPath as Record<string, unknown>)[path];
-      if (route) void router.loadRouteChunk(route as never)?.catch?.(() => undefined);
+    const ids = ["/_authenticated", "/_authenticated/chats", "/_authenticated/hobby", "/_authenticated/master", "/_authenticated/chat/$userId"] as const;
+    for (const id of ids) {
+      const route = router.routesById[id];
+      void Promise.resolve(router.loadRouteChunk(route)).catch(() => undefined);
     }
   }, [router]);
 

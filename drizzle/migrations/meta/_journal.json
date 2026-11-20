@@ -15,6 +15,13 @@
       "when": 1795050655020,
       "tag": "0001_dot_seen_hide_presence",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1795150139291,
+      "tag": "0002_chat_summaries",
+      "breakpoints": true
     }
   ]
 }

@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, CheckSquare, Gamepad2, Loader2, Lock, MoreVertical, Phone, Trash2, Video, X } from "lucide-react";
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -18,7 +18,9 @@ import { supabase } from "@/integrations/supabase/client";
 import { useCall } from "@/lib/call-context";
 import { extFor, pairKey, shrinkImage } from "@/lib/media";
 import { fetchConversation, messagesKey, useTalk, type Message } from "@/lib/talk-context";
-import { ago } from "@/lib/time";
+import { ago, newMessagesLabel } from "@/lib/time";
+import { summariesKey, type Summary } from "@/lib/chat-summaries";
+import { useKeyboardInset } from "@/hooks/use-keyboard-inset";
 
 export const Route = createFileRoute("/_authenticated/chat/$userId")({
   head: () => ({
@@ -33,24 +35,6 @@ export const Route = createFileRoute("/_authenticated/chat/$userId")({
   }),
   component: ChatPage,
 });
-
-/** Height of the on-screen keyboard, read from the visual viewport. */
-function useKeyboardOffset() {
-  const [off, setOff] = useState(0);
-  useEffect(() => {
-    const vv = window.visualViewport;
-    if (!vv) return;
-    const fn = () => setOff(Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)));
-    vv.addEventListener("resize", fn);
-    vv.addEventListener("scroll", fn);
-    fn();
-    return () => {
-      vv.removeEventListener("resize", fn);
-      vv.removeEventListener("scroll", fn);
-    };
-  }, []);
-  return off;
-}
 
 function dayLabel(iso: string) {
   const d = new Date(iso);
@@ -73,6 +57,16 @@ function useTick(ms: number) {
   return now;
 }
 
+/** "Sent 1m ago" / "Seen 1m ago" under your last message. Ticks on its own. */
+const ReceiptLine = memo(function ReceiptLine({ m }: { m: Message }) {
+  const now = useTick(30_000);
+  return (
+    <p className="px-4 pb-1 pt-0.5 text-right text-[11px] font-medium text-muted-foreground" aria-live="polite">
+      {m.seen_at ? <span className="text-primary">Seen {ago(m.seen_at, now)}</span> : <>Sent {ago(m.created_at, now)}</>}
+    </p>
+  );
+});
+
 function ChatPage() {
   const { userId: otherId } = Route.useParams();
   const navigate = useNavigate();
@@ -93,12 +87,31 @@ function ChatPage() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [confirmAll, setConfirmAll] = useState(false);
   const [confirmSel, setConfirmSel] = useState(false);
-  const now = useTick(30_000);
   const [pending, setPending] = useState<Pending[]>([]);
-  const [composerH, setComposerH] = useState(72);
-  const kb = useKeyboardOffset();
+  const rootRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const atBottom = useRef(true);
+  const openedAt = useRef(Date.now());
+
+  // Keyboard opens/closes: only the composer moves; keep the newest message in view.
+  useKeyboardInset(rootRef, (kbNow, prev) => {
+    const el = listRef.current;
+    if (!el || !atBottom.current) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: kbNow > prev ? "smooth" : "auto" });
+  });
+  const onComposerHeight = useCallback((h: number) => {
+    rootRef.current?.style.setProperty("--composer-h", `${h}px`);
+    const el = listRef.current;
+    if (el && atBottom.current) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  // "N New Messages" divider: worked out once when the chat opens.
+  const divider = useRef<{ chat: string; firstId: string | null; count: number } | null>(null);
+  if (!isLoading && divider.current?.chat !== otherId) {
+    const unseen = messages.filter((m) => m.sender_id === otherId && !m.seen_at);
+    divider.current = { chat: otherId, firstId: unseen[0]?.id ?? null, count: unseen.length };
+    openedAt.current = Date.now();
+  }
 
   useEffect(() => {
     talk.setActiveChat(otherId);
@@ -129,7 +142,13 @@ function ChatPage() {
         qc.setQueryData<Message[]>(messagesKey(otherId), (old) =>
           old?.map((m) => (m.sender_id === otherId && !m.seen_at ? { ...m, seen_at: at } : m)),
         );
-        void qc.invalidateQueries({ queryKey: ["unread", me] });
+        // Clear this chat's "N New Messages" right away, then confirm with the server.
+        qc.setQueryData<Map<string, Summary>>(summariesKey(me), (old) => {
+          const row = old?.get(otherId);
+          if (!old || !row || !row.unread) return old;
+          return new Map(old).set(otherId, { ...row, unread: 0 });
+        });
+        void qc.invalidateQueries({ queryKey: summariesKey(me) });
       });
     };
     run();
@@ -145,7 +164,7 @@ function ChatPage() {
 
   useLayoutEffect(() => {
     if (atBottom.current) scrollToBottom();
-  }, [messages.length, pending.length, kb, composerH, isTyping, scrollToBottom]);
+  }, [messages.length, pending.length, isTyping, scrollToBottom]);
 
   useLayoutEffect(() => {
     if (!isLoading) scrollToBottom();
@@ -155,7 +174,7 @@ function ChatPage() {
     qc.setQueryData<Message[]>(messagesKey(otherId), (old) =>
       old ? (old.some((x) => x.id === m.id) ? old : [...old, m]) : [m],
     );
-    void qc.invalidateQueries({ queryKey: ["recent", me] });
+    void qc.invalidateQueries({ queryKey: summariesKey(me) });
   };
 
   const insert = async (row: Partial<Message> & { kind: Message["kind"] }) => {
@@ -230,7 +249,7 @@ function ChatPage() {
     if (gone.size < ids.length) toast("Some messages were already seen, so they were kept.");
     qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !gone.has(m.id)));
     void removeMedia(selectedRows.filter((m) => gone.has(m.id)));
-    void qc.invalidateQueries({ queryKey: ["recent", me] });
+    void qc.invalidateQueries({ queryKey: summariesKey(me) });
     endSelection();
   };
 
@@ -243,8 +262,7 @@ function ChatPage() {
     }
     const hidden = new Set(ids);
     qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => !hidden.has(m.id)));
-    void qc.invalidateQueries({ queryKey: ["recent", me] });
-    void qc.invalidateQueries({ queryKey: ["unread", me] });
+    void qc.invalidateQueries({ queryKey: summariesKey(me) });
     endSelection();
   };
 
@@ -256,24 +274,35 @@ function ChatPage() {
       return;
     }
     qc.setQueryData<Message[]>(messagesKey(otherId), (old) => old?.filter((m) => m.sender_id !== me));
-    void qc.invalidateQueries({ queryKey: ["recent", me] });
+    void qc.invalidateQueries({ queryKey: summariesKey(me) });
   };
 
-  const toggle = (id: string) =>
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      if (n.size === 0) setSelectMode(false);
-      return n;
-    });
+  const toggle = useCallback(
+    (id: string) =>
+      setSelected((s) => {
+        const n = new Set(s);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        if (n.size === 0) setSelectMode(false);
+        return n;
+      }),
+    [],
+  );
+  const startSelect = useCallback((id: string) => {
+    setSelectMode(true);
+    setSelected((s) => new Set(s).add(id));
+  }, []);
 
   const lastMineId = [...messages].reverse().find((m) => m.sender_id === me)?.id;
   const statusLine = isTyping ? `${peer?.display_name ?? "They"} is typing...` : isOnline ? "Online" : "Offline";
   const callDisabled = !isOnline || !!call;
 
   return (
-    <div className="fixed inset-0 flex flex-col bg-background">
+    <div
+      ref={rootRef}
+      className="chat-root page-in fixed inset-x-0 bottom-0 flex flex-col bg-background"
+      style={{ top: "var(--vv-top)" }}
+    >
       <header className="glass relative z-30 border-b border-border pt-[env(safe-area-inset-top)]">
         {selectMode ? (
           <div className="mx-auto flex h-16 max-w-2xl items-center gap-2 px-2">
@@ -335,8 +364,7 @@ function ChatPage() {
           const el = e.currentTarget;
           atBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
-        className="flex-1 overflow-y-auto overscroll-contain"
-        style={{ paddingBottom: composerH + kb + 12 }}
+        className="chat-scroll no-scrollbar flex-1 overflow-y-auto"
       >
         <div className="mx-auto flex min-h-full max-w-2xl flex-col justify-end pt-4">
           {isLoading ? (
@@ -352,6 +380,15 @@ function ChatPage() {
               const mine = m.sender_id === me;
               return (
                 <Fragment key={m.id}>
+                  {divider.current?.firstId === m.id && divider.current.count > 0 && (
+                    <div className="my-3 flex items-center gap-3 px-4" role="separator">
+                      <span className="h-px flex-1 bg-primary/30" />
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-primary">
+                        {newMessagesLabel(divider.current.count)}
+                      </span>
+                      <span className="h-px flex-1 bg-primary/30" />
+                    </div>
+                  )}
                   {showDay && (
                     <div className="my-3 flex justify-center">
                       <span className="rounded-full bg-secondary px-3 py-1 text-[11px] font-medium text-muted-foreground">
@@ -364,21 +401,11 @@ function ChatPage() {
                     mine={mine}
                     selectMode={selectMode}
                     selected={selected.has(m.id)}
-                    onLongPress={() => {
-                      setSelectMode(true);
-                      setSelected((s) => new Set(s).add(m.id));
-                    }}
-                    onTap={() => toggle(m.id)}
+                    fresh={new Date(m.created_at).getTime() > openedAt.current}
+                    onLongPress={startSelect}
+                    onTap={toggle}
                   />
-                  {isLastMine && !selectMode && (
-                    <p className="px-4 pb-1 pt-0.5 text-right text-[11px] font-medium text-muted-foreground" aria-live="polite">
-                      {m.seen_at ? (
-                        <span className="text-primary">Seen {ago(m.seen_at, now)}</span>
-                      ) : (
-                        <>Sent {ago(m.created_at, now)}</>
-                      )}
-                    </p>
-                  )}
+                  {isLastMine && !selectMode && <ReceiptLine m={m} />}
                 </Fragment>
               );
             })
@@ -405,8 +432,7 @@ function ChatPage() {
       {!selectMode && (
         <Composer
           draftKey={otherId}
-          bottom={kb}
-          onHeight={setComposerH}
+          onHeight={onComposerHeight}
           onTyping={() => talk.sendTyping(otherId)}
           onSendText={sendText}
           onSendFile={(f) => void sendFile(f)}

@@ -2,6 +2,8 @@ import type { QueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { matchPin, savePins, sendOffline, type Dest } from "./pin-cache";
 import type { LoginResult } from "./talk.functions";
+import { fetchSummaries, summariesKey } from "./chat-summaries";
+import { fetchContacts, fetchMe } from "./talk-context";
 
 type LoginFn = (opts: { data: { pin: string; currentUserId?: string | null } }) => Promise<LoginResult>;
 export type Resolved = { ok: true; dest: Dest; userId: string; switched: boolean } | { ok: false; error: string };
@@ -15,7 +17,11 @@ export async function resolvePin(pin: string, login: LoginFn, qc: QueryClient): 
   const current = data.session?.user.id ?? null;
   if (current) {
     const local = await matchPin(current, pin);
-    if (local) return { ok: true, dest: local, userId: current, switched: false };
+    if (local) {
+      // Instant path: same person on this device, checked on-device.
+      void qc.prefetchQuery({ queryKey: summariesKey(current), queryFn: fetchSummaries });
+      return { ok: true, dest: local, userId: current, switched: false };
+    }
   }
 
   const res = await login({ data: { pin, currentUserId: current } });
@@ -34,7 +40,11 @@ export async function resolvePin(pin: string, login: LoginFn, qc: QueryClient): 
     });
     if (error) return { ok: false, error: "Couldn't connect. Try again." };
   }
+  // Show the name/photo instantly, then load the next screen's data while it opens (not awaited).
   if (res.profile) qc.setQueryData(["me", res.userId], (old: unknown) => old ?? res.profile);
-  qc.setQueryData(["isMaster", res.userId], res.destination === "master" ? true : (old: unknown) => old);
+  qc.setQueryData(["isMaster", res.userId], res.destination === "master");
+  void qc.prefetchQuery({ queryKey: ["me", res.userId], queryFn: () => fetchMe(res.userId) });
+  void qc.prefetchQuery({ queryKey: ["contacts", res.userId], queryFn: () => fetchContacts(res.userId) });
+  void qc.prefetchQuery({ queryKey: summariesKey(res.userId), queryFn: fetchSummaries });
   return { ok: true, dest: res.destination, userId: res.userId, switched };
 }

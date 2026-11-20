@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { Check, Pause, Play, X } from "lucide-react";
 import { useSignedUrl } from "@/lib/media";
 import type { Message } from "@/lib/talk-context";
@@ -96,11 +96,14 @@ type Props = {
   mine: boolean;
   selectMode: boolean;
   selected: boolean;
-  onLongPress: () => void;
-  onTap: () => void;
+  /** Arrived while the chat was open: animate it in. */
+  fresh?: boolean;
+  onLongPress: (id: string) => void;
+  onTap: (id: string) => void;
 };
 
-export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTap }: Props) {
+/** Memoised: typing, presence and other bubbles changing never re-render this one. */
+export const MessageBubble = memo(function MessageBubble({ m, mine, selectMode, selected, fresh, onLongPress, onTap }: Props) {
   const url = useSignedUrl("chat-media", m.media_path);
   const [viewer, setViewer] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -111,23 +114,24 @@ export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTa
   return (
     <div
       className={cn(
-        "flex w-full px-3 py-0.5 transition-colors",
+        "flex w-full px-3 py-0.5 transition-colors duration-150",
+        fresh && "bubble-in",
         mine ? "justify-end" : "justify-start",
         selected && "bg-primary/10",
       )}
       onClick={() => {
-        if (selectMode) onTap();
+        if (selectMode) onTap(m.id);
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        onLongPress();
+        onLongPress(m.id);
       }}
       onPointerDown={() => {
         moved.current = false;
         timer.current = setTimeout(() => {
           if (!moved.current) {
             navigator.vibrate?.(15);
-            onLongPress();
+            onLongPress(m.id);
           }
         }, 480);
       }}
@@ -195,4 +199,4 @@ export function MessageBubble({ m, mine, selectMode, selected, onLongPress, onTa
       {viewer && url && <ImageViewer url={url} onClose={() => setViewer(false)} />}
     </div>
   );
-}
+});

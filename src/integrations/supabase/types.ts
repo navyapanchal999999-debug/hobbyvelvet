@@ -200,6 +200,18 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      chat_summaries: {
+        Args: never
+        Returns: {
+          last_at: string
+          last_body: string
+          last_id: string
+          last_kind: string
+          last_sender: string
+          other_id: string
+          unread: number
+        }[]
+      }
       go_offline: { Args: never; Returns: undefined }
       has_role: {
         Args: {
